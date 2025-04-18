@@ -1,0 +1,92 @@
+name: Deploy release artifacts
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    if: github.repository_owner == 'ghostiam' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # required to resolve the version string
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.0
+
+      - name: Build all targets
+        run: |
+          mkdir -p builds
+          for target in "x86_64-linux" "aarch64-linux" "x86_64-windows" "aarch64-windows" "x86_64-macos" "aarch64-macos"; do
+          zig build -Dcpu=baseline -Dtarget=${target} -Doptimize=ReleaseFast
+          if [[ $target == *"windows"* ]]; then
+           cp zig-out/bin/zig_ci_test.exe builds/zig_ci_test-${target}.exe
+          else
+           cp zig-out/bin/zig_ci_test builds/zig_ci_test-${target}
+          fi
+          done
+          
+          cd builds
+          cat <<EOF > release
+          # sha256sum
+          
+          \`\`\`
+          $(sha256sum *)
+          \`\`\`
+          EOF
+          
+          grep "^ *\.version =" ../build.zig.zon | awk -F\" '{print $2}' > version
+          
+          ls -la ../*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig_ci_test
+          path: builds/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zig_ci_test
+          path: zig_ci_test
+      - name: Get project version
+        run: |
+          cd zig_ci_test
+          echo "PROJECT_VERSION=$(cat version)" >> $GITHUB_ENV
+          cat $GITHUB_ENV
+      - name: Create zips
+        run: |
+          cd zig_ci_test
+          skip_files=("version" "release")
+          for file in *; do
+            if [[ " ${skip_files[@]} " =~ " $file " ]]; then
+              continue
+            fi
+          
+            chmod +x "$file"
+          
+            if [[ $file == *"windows"* ]]; then
+              zip -j "../${file%.*}.zip" "$file"
+              sha256sum "../${file%.*}.zip" | awk '{print $1}' >> "../${file%.*}.zip.sha256"
+            else
+              tar -czf "../${file%.*}.tar.gz" "$file"
+              sha256sum "../${file%.*}.tar.gz" | awk '{print $1}' >> "../${file%.*}.tar.gz.sha256"
+            fi
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.PROJECT_VERSION }}
+          tag_name: ${{ env.PROJECT_VERSION }}
+          body_path: zig_ci_test/release
+          draft: false
+          make_latest: true
+          files: "*.zip\n*.tar.gz\n*.sha256"
